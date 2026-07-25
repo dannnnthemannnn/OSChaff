@@ -26,9 +26,33 @@ _EMPTY_MAILHUB = {
 }
 
 
-def extract_state_assets(src: str) -> list[str]:
+_APP = {"MailHub": "mailhub", "TeamChat": "teamchat"}
+_HINTS = {"MailHub": ("gmail", "mail"), "TeamChat": ("teamchat", "chat")}
+
+
+def state_asset_for_service(src: str, service: str) -> str | None:
+    """Find the state JSON asset this task loads for `service`.
+
+    1. Prefer the `state=asset("X")` in the matching prepare_stateful_website_urls
+       call (handles multi-service tasks like 016: careerlink + mailhub).
+    2. Fall back to a json asset whose name hints the service, then any "state" json.
+    Returns None if the state is built dynamically (no static asset).
+    """
+    app = _APP[service]
+    for m in re.finditer(r"prepare_stateful_website_urls\((.*?)\)", src, re.S):
+        block = m.group(1)
+        if re.search(rf"""app\s*=\s*["']{app}["']""", block):
+            a = re.search(r"""state\s*=\s*asset\(\s*["']([^"']+\.json)["']""", block)
+            if a:
+                return a.group(1)
     jsons = re.findall(r"""asset\(\s*["']([^"']+\.json)["']""", src)
-    return [j for j in jsons if "state" in os.path.basename(j).lower()] or jsons
+    for j in jsons:
+        if any(h in j.lower() for h in _HINTS[service]):
+            return j
+    for j in jsons:
+        if "state" in os.path.basename(j).lower():
+            return j
+    return None
 
 
 def locate_target(state: dict, service: str) -> tuple[int, str]:
@@ -93,19 +117,22 @@ def _soft_check(src_obj, fork_obj) -> str:
 # --------------------------------------------------------------------------- #
 def perturb_channel(cfg: ChaffConfig, ctx: ForkContext, task_id: str,
                     source_py: str, service: str, check: bool = False) -> str:
-    rels = extract_state_assets(source_py)
-    if not rels:
-        summary = "no state asset found; left unchanged"
+    rel = state_asset_for_service(source_py, service)
+    if not rel:
+        summary = f"[SKIPPED] no static {service} state asset (built dynamically)"
         ctx.record_task(task_id, "channel", summary); return summary
-    rel = rels[0]
     src_abs = fetch_source_asset(cfg, rel)
     if not src_abs:
-        summary = f"asset {rel} unavailable; left unchanged"
+        summary = f"[SKIPPED] asset {rel} unavailable"
         ctx.record_task(task_id, "channel", summary); return summary
 
     fork_abs = os.path.join(ctx.assets_dir, rel)
-    state = json.load(open(src_abs))
-    n_real, placement = locate_target(state, service)
+    try:
+        state = json.load(open(src_abs))
+        n_real, placement = locate_target(state, service)
+    except (KeyError, ValueError) as e:
+        summary = f"[SKIPPED] {rel} isn't a {service} state ({e})"
+        ctx.record_task(task_id, "channel", summary); return summary
     counts = counts_channel(cfg, n_real)
     prompt = build_channel_prompt(cfg, service, _instruction(source_py), fork_abs, n_real, counts, placement)
 
