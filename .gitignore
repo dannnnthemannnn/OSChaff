@@ -6,3 +6,4 @@ venv/
 *.egg-info/
 cache/
 evaluation_examples/task_class/
+forks/
