@@ -20,6 +20,7 @@ class ChaffConfig:
     source_tasks: str = "cache/osworld_tasks"
     source_assets: str = "cache/osworld_assets"
     out_root: str = "forks"
+    retries: int = 2                    # re-run the worker if it errors / no-ops
 
     def __post_init__(self) -> None:
         for name in ("volume", "deceptiveness"):

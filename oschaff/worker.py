@@ -103,17 +103,27 @@ def perturb_channel(cfg: ChaffConfig, ctx: ForkContext, task_id: str,
         summary = f"asset {rel} unavailable; left unchanged"
         ctx.record_task(task_id, "channel", summary); return summary
 
-    ctx.add_asset(rel, src_abs)
     fork_abs = os.path.join(ctx.assets_dir, rel)
     state = json.load(open(src_abs))
     n_real, placement = locate_target(state, service)
     counts = counts_channel(cfg, n_real)
-
     prompt = build_channel_prompt(cfg, service, _instruction(source_py), fork_abs, n_real, counts, placement)
-    _, out = run_claude(prompt, ctx.root, cfg.model)
 
-    line = f"+{sum(counts.values())} items ({counts['filler']}f/{counts['near_miss']}n/{counts['superseded']}s) into {n_real} real\n{_tail(out)}"
-    if check:
+    added, out = 0, ""
+    for attempt in range(cfg.retries + 1):
+        ctx.add_asset(rel, src_abs)   # reset to source each attempt
+        _, out = run_claude(prompt, ctx.root, cfg.model)
+        try:
+            n_after, _ = locate_target(json.load(open(fork_abs)), service)
+            added = n_after - n_real
+        except Exception:
+            added = 0
+        if added > 0:
+            break
+
+    status = f"OK ({added} added)" if added > 0 else f"FAILED — no-op after {cfg.retries + 1} attempts"
+    line = f"+{added}/{sum(counts.values())} items ({counts['filler']}f/{counts['near_miss']}n/{counts['superseded']}s) into {n_real} real [{status}]\n{_tail(out)}"
+    if check and added > 0:
         line += "\n" + _soft_check(json.load(open(src_abs)), json.load(open(fork_abs)))
     ctx.record_task(task_id, "channel", line)
     return line
@@ -122,15 +132,28 @@ def perturb_channel(cfg: ChaffConfig, ctx: ForkContext, task_id: str,
 def perturb_bolton(cfg: ChaffConfig, ctx: ForkContext, task_id: str, source_py: str) -> str:
     service = "MailHub"
     rel = f"task_{task_id}/chaff_mail.json"
-    ctx.write_asset(rel, json.dumps(_EMPTY_MAILHUB, indent=2))
     state_abs = os.path.join(ctx.assets_dir, rel)
-    task_abs = os.path.join(ctx.tasks_dir, f"task_{task_id}.py")   # written by chaff.py first
+    task_abs = os.path.join(ctx.tasks_dir, f"task_{task_id}.py")
 
     counts = counts_boltnon(cfg)
     prompt = build_bolton_prompt(cfg, service, _instruction(source_py), state_abs, task_abs, counts)
     prompt = prompt.replace("{RELATIVE_STATE_ASSET}", rel)
-    _, out = run_claude(prompt, ctx.root, cfg.model)
 
-    line = f"attached {service} + {sum(counts.values())} distractor emails ({counts['filler']}f/{counts['near_miss']}n/{counts['superseded']}s)\n{_tail(out)}"
+    emails, py_changed, out = 0, False, ""
+    for attempt in range(cfg.retries + 1):
+        ctx.write_asset(rel, json.dumps(_EMPTY_MAILHUB, indent=2))  # reset state
+        ctx.add_task_file(task_id, source_py)                       # reset task .py
+        _, out = run_claude(prompt, ctx.root, cfg.model)
+        try:
+            emails = len(json.load(open(state_abs))["data"]["emails"])
+        except Exception:
+            emails = 0
+        py_changed = open(task_abs, encoding="utf-8").read() != source_py
+        if emails > 0 and py_changed:
+            break
+
+    ok = emails > 0 and py_changed
+    status = "OK" if ok else f"FAILED after {cfg.retries + 1} attempts (emails={emails}, provisioned={py_changed})"
+    line = f"attached {service} + {emails}/{sum(counts.values())} emails, setup provisioned={py_changed} [{status}]\n{_tail(out)}"
     ctx.record_task(task_id, "bolt_on", line)
     return line
