@@ -1,9 +1,8 @@
-"""Fork materialization: the frozen, hashed OSWorld-Chaff-<uuid> bundle.
+"""Fork output — a per-group directory that accumulates across single-task runs.
 
-The fork is an OVERLAY on a stock OSWorld-V2 checkout: it ships the (possibly
-edited) task_*.py for every task plus only the assets that changed or were
-injected. To run it, point the stock runner's task dir at ``tasks/`` and layer
-``assets/`` over the original asset base.
+`<out_root>/<group>/` holds edited `tasks/task_<id>.py` + injected `assets/`, plus
+a rebuilt `fork.json`, `MANIFEST.lock` (sha256s), and human-readable `REPORT.md`.
+Running more task IDs with the same group adds to the same dir; nothing is wiped.
 """
 
 from __future__ import annotations
@@ -12,18 +11,11 @@ import hashlib
 import json
 import os
 import shutil
-import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from .config import ChaffConfig
 
-
-@dataclass
-class ReportEntry:
-    task_id: str
-    mode: str
-    detail: str = ""          # human-readable block for REPORT.md
-    invariants: str = "n/a"
+_META = {"fork.json", "MANIFEST.lock", "REPORT.md", "chaff.json"}
 
 
 @dataclass
@@ -31,9 +23,8 @@ class ForkContext:
     root: str
     tasks_dir: str
     assets_dir: str
-    fork_uuid: str
+    group: str
     cfg: ChaffConfig
-    entries: list[ReportEntry] = field(default_factory=list)
 
     def add_task_file(self, task_id: str, text: str) -> None:
         with open(os.path.join(self.tasks_dir, f"task_{task_id}.py"), "w", encoding="utf-8") as f:
@@ -44,88 +35,77 @@ class ForkContext:
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         shutil.copy2(src_abs, dst)
 
-    def write_asset(self, rel_path: str, text: str) -> None:
+    def write_asset(self, rel_path: str, text: str) -> str:
         dst = os.path.join(self.assets_dir, rel_path)
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         with open(dst, "w", encoding="utf-8") as f:
             f.write(text)
+        return dst
+
+    # -- accumulating record of what each task got ------------------------- #
+    def _chaff_path(self) -> str:
+        return os.path.join(self.root, "chaff.json")
+
+    def record_task(self, task_id: str, mode: str, summary: str) -> None:
+        data = self._load_record()
+        data["tasks"][task_id] = {
+            "mode": mode, "volume": self.cfg.volume,
+            "deceptiveness": self.cfg.deceptiveness, "summary": summary,
+        }
+        with open(self._chaff_path(), "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+
+    def _load_record(self) -> dict:
+        if os.path.exists(self._chaff_path()):
+            return json.load(open(self._chaff_path()))
+        return {"group": self.group, "model": self.cfg.model, "tasks": {}}
 
 
-def new_fork(cfg: ChaffConfig) -> ForkContext:
-    fork_uuid = str(uuid.uuid4())[:8]
-    # absolute so the headless worker (run with cwd=root) resolves paths correctly
-    root = os.path.abspath(os.path.join(cfg.output_root, f"OSWorld-Chaff-{fork_uuid}"))
+def open_fork(cfg: ChaffConfig, group: str) -> ForkContext:
+    """Open (create if needed) the group's fork dir. Never wipes existing content."""
+    root = os.path.abspath(os.path.join(cfg.out_root, group))
     tasks_dir = os.path.join(root, "tasks")
     assets_dir = os.path.join(root, "assets")
     os.makedirs(tasks_dir, exist_ok=True)
     os.makedirs(assets_dir, exist_ok=True)
-    return ForkContext(root, tasks_dir, assets_dir, fork_uuid, cfg)
+    return ForkContext(root, tasks_dir, assets_dir, group, cfg)
 
 
-def _hash_tree(root: str) -> dict[str, str]:
-    """sha256 of every file under root, keyed by relative posix path."""
-    out: dict[str, str] = {}
-    for dirpath, _, files in os.walk(root):
+def finalize(ctx: ForkContext) -> str:
+    """Rebuild MANIFEST.lock, fork.json, REPORT.md from current dir contents."""
+    manifest = {}
+    for dp, _, files in os.walk(ctx.root):
         for fn in files:
-            ap = os.path.join(dirpath, fn)
-            rel = os.path.relpath(ap, root).replace(os.sep, "/")
-            if rel in ("MANIFEST.lock", "fork.json", "REPORT.md"):
+            rel = os.path.relpath(os.path.join(dp, fn), ctx.root).replace(os.sep, "/")
+            if rel in _META:
                 continue
             h = hashlib.sha256()
-            with open(ap, "rb") as f:
+            with open(os.path.join(dp, fn), "rb") as f:
                 for chunk in iter(lambda: f.read(65536), b""):
                     h.update(chunk)
-            out[rel] = h.hexdigest()
-    return dict(sorted(out.items()))
+            manifest[rel] = h.hexdigest()
+    manifest = dict(sorted(manifest.items()))
+    text = "".join(f"{h}  {rel}\n" for rel, h in manifest.items())
+    with open(os.path.join(ctx.root, "MANIFEST.lock"), "w") as f:
+        f.write(text)
+    fork_id = hashlib.sha256(text.encode()).hexdigest()[:12]
 
-
-def finalize(ctx: ForkContext, classifications: list) -> str:
-    """Write MANIFEST.lock, fork.json, REPORT.md. Return the content fork_id."""
-    manifest = _hash_tree(ctx.root)
-    manifest_text = "\n".join(f"{h}  {rel}" for rel, h in manifest.items()) + "\n"
-    with open(os.path.join(ctx.root, "MANIFEST.lock"), "w", encoding="utf-8") as f:
-        f.write(manifest_text)
-    fork_id = hashlib.sha256(manifest_text.encode()).hexdigest()[:12]
-
-    mode_counts: dict[str, int] = {}
-    for c in classifications:
-        mode_counts[c.mode] = mode_counts.get(c.mode, 0) + 1
-
-    meta = {
-        "name": f"OSWorld-Chaff-{ctx.fork_uuid}",
-        "fork_id": fork_id,
-        "source_release": "osworld-v2-2026.06.24",
-        "config": ctx.cfg.canonical(),
-        "mode_counts": mode_counts,
-        "file_count": len(manifest),
-    }
-    with open(os.path.join(ctx.root, "fork.json"), "w", encoding="utf-8") as f:
-        json.dump(meta, f, indent=2)
-
-    _write_report(ctx, mode_counts, classifications)
+    rec = ctx._load_record()
+    with open(os.path.join(ctx.root, "fork.json"), "w") as f:
+        json.dump({"group": ctx.group, "fork_id": fork_id, "model": ctx.cfg.model,
+                   "source_release": "osworld-v2-2026.06.24", "tasks": rec["tasks"],
+                   "file_count": len(manifest)}, f, indent=2)
+    _write_report(ctx, rec)
     return fork_id
 
 
-def _write_report(ctx: ForkContext, mode_counts: dict, classifications: list) -> None:
-    cfg = ctx.cfg
-    lines = [
-        f"# OSWorld-Chaff-{ctx.fork_uuid} — injection report",
-        "",
-        f"- model: `{cfg.model}`  · amount: `{cfg.amount}`  · relevance: `{cfg.relevance}`",
-        f"- services: {cfg.services}  · bolt_on: {cfg.bolt_on}  · dynamic_delivery: {cfg.dynamic_delivery}  · seed: {cfg.seed}",
-        f"- tasks: " + "  ".join(f"{m}={n}" for m, n in sorted(mode_counts.items())),
-        "",
-        "## Per-task",
-        "",
-    ]
-    by_id = {e.task_id: e for e in ctx.entries}
-    for c in sorted(classifications, key=lambda c: c.task_id):
-        e = by_id.get(c.task_id)
-        if e and e.detail:
-            lines.append(e.detail.rstrip())
-            lines.append(f"  invariants: {e.invariants}")
-        else:
-            lines.append(f"### task_{c.task_id}  ({c.mode})  — {c.reason}")
+def _write_report(ctx: ForkContext, rec: dict) -> None:
+    lines = [f"# {ctx.group} — OSChaff injection report", "",
+             f"model: `{ctx.cfg.model}` · tasks perturbed: {len(rec['tasks'])}", "", "## Per-task", ""]
+    for tid in sorted(rec["tasks"]):
+        t = rec["tasks"][tid]
+        lines.append(f"### task_{tid}  ({t['mode']})  vol={t['volume']} dec={t['deceptiveness']}")
+        lines.append(t["summary"].rstrip())
         lines.append("")
-    with open(os.path.join(ctx.root, "REPORT.md"), "w", encoding="utf-8") as f:
+    with open(os.path.join(ctx.root, "REPORT.md"), "w") as f:
         f.write("\n".join(lines))

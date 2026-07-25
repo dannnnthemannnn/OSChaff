@@ -1,9 +1,8 @@
-"""Build the per-task instruction for the headless noise worker.
+"""Prompts for the headless noise worker.
 
-The harness decides *how much* and *what mix* (deterministic, from the dials);
-the worker decides *what to write* (plausible, task-aware content). The invariant
-rules are stated in-prompt AND enforced afterward by checks.py — the prompt is
-guidance, the verifier is the guarantee.
+The harness fixes *how much* and *what mix* (from the 0-10 dials); the worker
+writes plausible, task-aware content and (for bolt-on) provisions the channel.
+The pattern library below is what makes distractors potent-yet-fair.
 """
 
 from __future__ import annotations
@@ -13,57 +12,108 @@ from .perturb import nastiness_to_mix
 
 _ITEM_WORD = {"MailHub": "email", "TeamChat": "message"}
 
+# The gold-standard trap patterns: non-authoritative content that looks
+# decision-relevant but isn't, so a careless agent is tricked but a careful one
+# that trusts the real task/spec still gets it right.
+PATTERNS = """DISTRACTOR PATTERNS — each looks decision-relevant but a careful reader can rule it out:
+- FUTURE-DATED: a policy/decision that "takes effect" later. e.g. "New rule: mirror all exports L-R — effective in 2 weeks; until then keep the current process." (correct read: no change now)
+- CONDITIONAL / WRONG-SCOPE: applies to a DIFFERENT team/item/context. e.g. "For Marketing deliverables use 1024x768." (the task is an Engineering deliverable -> N/A)
+- SUPERSEDED: an EARLIER-timestamped value that a later real item overrides. e.g. an old "cap is $800" before the real "$1,000".
+- REJECTED: a proposal that is shot down in the same thread. e.g. "Can we drop the cap to $500?" -> "No, keep it at $1,000."
+- MERELY-FLOATED: an idea raised but never confirmed. e.g. "Maybe switch vendors to Eastgate?" -> (no reply / "let me think about it")
+- NEAR-MISS: shares an entity (sender/topic/date) with the real target but differs on the load-bearing detail (different team, amount, vendor, item).
+Where relevant, reference the task's ACTUAL requirement so the trap is tempting.
+"""
 
-def counts_for(cfg: ChaffConfig, n_real: int) -> dict[str, int]:
-    """Deterministic distractor budget from the two dials."""
-    target_total = round(n_real / cfg.amount)
-    n_distract = max(0, target_total - n_real)
-    mix = nastiness_to_mix(cfg.relevance)
-    raw = {k: n_distract * mix[k] for k in mix}
+_RULE = ("HARD RULE: a careful worker who trusts the real task and the authoritative items must "
+         "still get the task RIGHT. If following your distractor would be the *reasonable* choice, "
+         "it is too strong — soften it (make it clearly future/conditional/rejected/unconfirmed).")
+
+
+def _split(total: int, mix: dict[str, float]) -> dict[str, int]:
+    raw = {k: total * mix[k] for k in mix}
     out = {k: int(v) for k, v in raw.items()}
-    rem = n_distract - sum(out.values())
-    for k in sorted(raw, key=lambda k: raw[k] - out[k], reverse=True)[:rem]:
+    for k in sorted(raw, key=lambda k: raw[k] - out[k], reverse=True)[: total - sum(out.values())]:
         out[k] += 1
     return out
 
 
-_RULES = """HARD RULES — a violation makes the task invalid and your work will be discarded:
-1. NEVER modify or delete any existing item. ONLY ADD new items.
-2. Edit ONLY the one state file named below. Never touch any file whose name contains "gt" or "ground_truth", and never change the task's requirements.
-3. Your additions must NOT change the task's correct answer. The real items stay authoritative; a distractor must be something a careful worker would correctly reject by trusting the real task instruction and the real items.
-4. Make each addition realistic: match the senders, formatting, and style of existing items, and give it a unique id in the SAME format as existing ids.
-5. Keep the JSON valid."""
+def counts_channel(cfg: ChaffConfig, n_real: int) -> dict[str, int]:
+    total = round(n_real * cfg.volume / 2)
+    return _split(total, nastiness_to_mix(cfg.deceptiveness / 10))
 
-_TYPES = """- {n_filler} FILLER: topically unrelated; cheap to ignore (newsletters, reminders, chit-chat).
-- {n_near} NEAR-MISS: look relevant and plausible but are WRONG — share an entity (sender / topic / date) with a real item but differ on the load-bearing detail (a DIFFERENT team, amount, vendor, item, or date). If the agent wrongly acted on one, its deliverable would be wrong.
-- {n_super} SUPERSEDED: an EARLIER-timestamped version of a real item's instruction/decision, with a DIFFERENT value. The real (newer) item stays authoritative. Give each a timestamp EARLIER than the real item it shadows."""
+
+def counts_boltnon(cfg: ChaffConfig) -> dict[str, int]:
+    total = max(3, round(cfg.volume * 1.2))     # no real items to scale off; use the dial
+    return _split(total, nastiness_to_mix(cfg.deceptiveness / 10))
+
+
+def _mix_line(counts: dict[str, int]) -> str:
+    return (f"{counts['filler']} filler (topically unrelated, easy to ignore), "
+            f"{counts['near_miss']} near-miss, {counts['superseded']} superseded/disarmable-trap")
 
 
 def build_channel_prompt(cfg: ChaffConfig, service: str, instruction: str,
                          abs_state_path: str, n_real: int, counts: dict[str, int],
                          placement: str) -> str:
-    item_word = _ITEM_WORD[service]
-    location = placement
+    word = _ITEM_WORD[service]
+    total = sum(counts.values())
     dynamic = ""
-    if cfg.dynamic_delivery and service == "TeamChat":
-        dynamic = (
-            "\nMID-RUN DELIVERY: additionally, add 1-2 of the near-miss/filler items as timed "
-            "messages by appending entries to data.time_data, each shaped "
-            "{\"arrive_after_s\": <60-600>, \"conversation_id\": <channel id>, "
-            "\"conversation_type\": \"channel\", \"messageId\": <unique>, \"senderId\": <a real user>, "
-            "\"content\": <text>} so they arrive while the agent is working.\n")
-    return f"""You are hardening a computer-use benchmark task by adding DISTRACTOR content to an app's saved state, to make it harder for an AI agent to pick out the real information — WITHOUT changing what the task requires or its correct answer.
+    if service == "TeamChat":
+        dynamic = ("\nMID-RUN: add 1-2 items as timed messages by appending to data.time_data "
+                   "(each: {\"arrive_after_s\": 60-600, \"conversation_id\": <channel>, "
+                   "\"conversation_type\": \"channel\", \"messageId\": <unique>, \"senderId\": <a real user>, "
+                   "\"content\": <text>}), so they arrive while the agent works.\n")
+    return f"""You are HARDENING a computer-use benchmark task by adding DISTRACTOR {word}s to an app's saved state — to make it harder for an AI agent to pick out the real information, WITHOUT changing what the task requires or its correct answer.
 
-THE TASK the agent-under-test must accomplish (for context — do NOT change it):
+THE TASK the agent-under-test must do (context; do NOT change it):
 \"\"\"{instruction}\"\"\"
 
-THE FILE TO EDIT (a JSON state envelope for {service}):
-{abs_state_path}
-The {item_word}s live at: {location}. There are currently {n_real} real {item_word}s there.
+FILE TO EDIT (a JSON state envelope for {service}): {abs_state_path}
+The {word}s live at: {placement}. There are {n_real} REAL {word}s there now.
 
-ADD EXACTLY {sum(counts.values())} new {item_word}s:
-{_TYPES.format(n_filler=counts['filler'], n_near=counts['near_miss'], n_super=counts['superseded'])}
-{dynamic}
-{_RULES}
+ADD EXACTLY {total} new {word}s: {_mix_line(counts)}.
+{PATTERNS}{dynamic}
+RULES:
+1. NEVER modify or delete an existing item — ONLY ADD. Give each a unique id in the same format as existing ids, and match the senders/style/format of the real items.
+2. Edit only this file. Never touch files with "gt" or "ground_truth" in the name. Keep the JSON valid.
+3. {_RULE}
 
-When finished, print a summary: one line per added item — its type, sender, and a short gist — so a human can eyeball plausibility."""
+When done, print one line per added item: type, sender, and a short gist (for a human eyeball)."""
+
+
+def build_bolton_prompt(cfg: ChaffConfig, service: str, instruction: str,
+                        abs_state_path: str, abs_task_path: str, counts: dict[str, int]) -> str:
+    word = _ITEM_WORD[service]
+    total = sum(counts.values())
+    return f"""You are HARDENING a computer-use benchmark task by ATTACHING a {service} channel to it and filling it with DISTRACTOR {word}s — plausible-but-wrong information that tempts an agent into a mistake, WITHOUT changing what the task requires or its correct answer.
+
+THE TASK the agent-under-test must do (context; do NOT change its requirements):
+\"\"\"{instruction}\"\"\"
+
+Do THREE things:
+
+A) POPULATE the new {service} state file: {abs_state_path}
+   It's a valid-but-nearly-empty {service} envelope. Add {total} {word}s to data.emails:
+   {_mix_line(counts)}.
+   Since this channel is brand-new there are no real items here, so lean on the SELF-CONTAINED
+   patterns (future-dated / conditional / wrong-scope / rejected / merely-floated) and make them
+   reference the task's ACTUAL requirement, so they tempt an error while a careful reader rules
+   them out. Use realistic senders and a plausible mix; keep JSON valid.
+{PATTERNS}
+B) PROVISION the channel in the task file: {abs_task_path}
+   Inside setup(), ADD these lines (do not remove anything; if Chrome isn't already launched, add the two launch lines):
+     setup_controller.launch(["google-chrome", "--remote-debugging-port=1337"])
+     setup_controller.launch(["socat", "tcp-listen:9222,fork", "tcp:localhost:1337"])
+     urls_to_open = prepare_stateful_website_urls(app="{service.lower()}", state=asset("{{RELATIVE_STATE_ASSET}}"))
+     setup_controller._chrome_open_tabs_setup(urls_to_open)
+   Ensure the needed imports exist (prepare_stateful_website_urls from desktop_env.controllers.website; asset from desktop_env.file_source).
+
+C) APPEND to the `instruction` string (do NOT alter the existing text — only append):
+   " You may also have relevant messages in {service} — check there if you need more information."
+
+RULES:
+- NEVER change the task's requirements or its evaluate()/grader. Only ADD.
+- {_RULE}
+
+When done, print one line per added {word}: type, sender, gist."""

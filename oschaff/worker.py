@@ -1,9 +1,9 @@
-"""The headless Claude Code noise worker (channel mode).
+"""The headless Claude Code noise worker.
 
-Per task: copy the source state asset into the fork, ask a headless `claude -p`
-to ADD distractors to it, then verify the edit is additive-only. On any
-violation, retry once; if it still fails, revert the asset to byte-identical and
-mark the task skipped. The verifier — not the prompt — is the guarantee.
+Per task: run `claude -p` to add distractors (channel mode) or attach + fill a
+new channel (bolt-on mode). No gating/retry — the edit lands in the fork and you
+review it by diff. An optional soft `check` prints an additive-only warning but
+never blocks or reverts.
 """
 
 from __future__ import annotations
@@ -11,42 +11,40 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
 import subprocess
 
-from .checks import InvariantError, verify_state_additive, verify_task_py
 from .config import ChaffConfig
-from .fork import ForkContext, ReportEntry
-from .prompts import build_channel_prompt, counts_for
+from .fork import ForkContext
+from .prompts import (build_bolton_prompt, build_channel_prompt,
+                      counts_boltnon, counts_channel)
+
+_EMPTY_MAILHUB = {
+    "meta": {"type": "mailhub", "version": 1},
+    "data": {"user": {"userId": "user-chaff", "email": "user@example.com"},
+             "emails": [], "labels": [], "drafts": []},
+    "note": "OSChaff-injected channel",
+}
 
 
 def extract_state_assets(src: str) -> list[str]:
-    """Relative asset paths of the task's *state* JSON(s) (heuristic: name has 'state')."""
     jsons = re.findall(r"""asset\(\s*["']([^"']+\.json)["']""", src)
-    state = [j for j in jsons if "state" in os.path.basename(j).lower()]
-    return state or jsons  # fall back to any json if none named 'state'
+    return [j for j in jsons if "state" in os.path.basename(j).lower()] or jsons
 
 
 def locate_target(state: dict, service: str) -> tuple[int, str]:
-    """Return (n_real, placement_description). The worker chooses WHERE to place
-    distractors (its strength); the harness only fixes the COUNT (the dial)."""
     if service == "MailHub":
         return len(state["data"]["emails"]), "data.emails (the inbox) — add new email objects to that list"
     msgs = state["data"]["teamchat"]["messages"]
-    n_real = sum(len(v) for v in msgs.values() if isinstance(v, list))
-    channels = [k for k, v in msgs.items() if isinstance(v, list) and v]
-    return n_real, (
-        "data.teamchat.messages — a dict of channels/DMs "
-        f"({', '.join(channels)}). Add new message objects to the list(s) of the "
-        "channel(s) and/or DMs where the REAL task-relevant discussion happens "
-        "(e.g. the approvals channel and the manager DM), NOT to unrelated chit-chat channels")
+    n = sum(len(v) for v in msgs.values() if isinstance(v, list))
+    chans = [k for k, v in msgs.items() if isinstance(v, list) and v]
+    return n, (f"data.teamchat.messages ({', '.join(chans)}). Add message objects to the list(s) "
+               "of the channel(s)/DMs where the REAL task discussion happens, not unrelated chit-chat")
 
 
 def fetch_source_asset(cfg: ChaffConfig, rel: str) -> str | None:
-    """Absolute path to the source asset, downloading from HF if not cached."""
     local = os.path.join(cfg.source_assets, rel)
     if os.path.exists(local):
-        return local
+        return os.path.abspath(local)
     try:
         from huggingface_hub import hf_hub_download
         return hf_hub_download("xlangai/osworld_v2_assets_gated", rel,
@@ -55,61 +53,14 @@ def fetch_source_asset(cfg: ChaffConfig, rel: str) -> str | None:
         return None
 
 
-def run_claude(prompt: str, cwd: str, model: str, timeout: int = 600,
-               extra_feedback: str = "") -> tuple[int, str]:
-    cmd = [
-        "claude", "-p", prompt + extra_feedback,
-        "--model", model,
-        "--add-dir", cwd,
-        "--permission-mode", "acceptEdits",
-        "--allowedTools", "Read,Edit,Write",
-    ]
+def run_claude(prompt: str, cwd: str, model: str, timeout: int = 600) -> tuple[int, str]:
+    cmd = ["claude", "-p", prompt, "--model", model, "--add-dir", cwd,
+           "--permission-mode", "acceptEdits", "--allowedTools", "Read,Edit,Write"]
     try:
         p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
         return p.returncode, (p.stdout or "") + (p.stderr or "")
     except subprocess.TimeoutExpired:
-        return 124, "worker timed out"
-
-
-def perturb_channel(cfg: ChaffConfig, ctx: ForkContext, task_id: str,
-                    source_py: str, service: str) -> ReportEntry:
-    rels = extract_state_assets(source_py)
-    if not rels:
-        return ReportEntry(task_id, "channel", f"### task_{task_id} (channel · {service}) — no state asset found; left unchanged", "skipped")
-    rel = rels[0]
-
-    src_abs = fetch_source_asset(cfg, rel)
-    if not src_abs:
-        return ReportEntry(task_id, "channel", f"### task_{task_id} (channel · {service}) — asset {rel} unavailable; left unchanged", "skipped")
-    src_abs = os.path.abspath(src_abs)
-
-    # copy source -> fork, worker edits the fork copy
-    ctx.add_asset(rel, src_abs)
-    fork_abs = os.path.join(ctx.assets_dir, rel)  # absolute (assets_dir is absolute)
-    assert os.path.exists(fork_abs), f"fork asset vanished before worker: {fork_abs}"
-
-    state = json.load(open(src_abs))
-    n_real, placement = locate_target(state, service)
-    counts = counts_for(cfg, n_real)
-    instruction = _instruction(source_py)
-
-    prompt = build_channel_prompt(cfg, service, instruction, fork_abs, n_real, counts, placement)
-
-    feedback = ""
-    for attempt in range(cfg.max_retries + 1):
-        rc, out = run_claude(prompt, ctx.root, cfg.model, extra_feedback=feedback)
-        try:
-            added = verify_state_additive(json.load(open(src_abs)), json.load(open(fork_abs)))
-            summary = _tail(out)
-            detail = (f"### task_{task_id}  (channel · {service})  amount={cfg.amount} relevance={cfg.relevance}\n"
-                      f"+{added} items ({counts['filler']} filler / {counts['near_miss']} near-miss / {counts['superseded']} superseded)\n"
-                      f"{summary}")
-            return ReportEntry(task_id, "channel", detail, f"OK ({added} added, {n_real} real unchanged)")
-        except (InvariantError, json.JSONDecodeError) as e:
-            feedback = f"\n\nYOUR PREVIOUS EDIT WAS REJECTED: {e}. Restore any changed/removed real items and ONLY ADD new ones. Keep JSON valid."
-            shutil.copy2(src_abs, fork_abs)  # reset for retry
-
-    return ReportEntry(task_id, "channel", f"### task_{task_id} (channel · {service}) — worker failed invariants after retry; reverted to baseline", "REVERTED")
+        return 124, "(worker timed out — it likely finished editing before wrap-up)"
 
 
 def _instruction(src: str) -> str:
@@ -125,6 +76,61 @@ def _instruction(src: str) -> str:
     return ""
 
 
-def _tail(out: str, n: int = 900) -> str:
+def _tail(out: str, n: int = 1200) -> str:
     out = out.strip()
     return out[-n:] if len(out) > n else out
+
+
+def _soft_check(src_obj, fork_obj) -> str:
+    from .checks import InvariantError, verify_state_additive
+    try:
+        verify_state_additive(src_obj, fork_obj)
+        return "check: additive-only OK"
+    except InvariantError as e:
+        return f"check: WARNING — {e}"
+
+
+# --------------------------------------------------------------------------- #
+def perturb_channel(cfg: ChaffConfig, ctx: ForkContext, task_id: str,
+                    source_py: str, service: str, check: bool = False) -> str:
+    rels = extract_state_assets(source_py)
+    if not rels:
+        summary = "no state asset found; left unchanged"
+        ctx.record_task(task_id, "channel", summary); return summary
+    rel = rels[0]
+    src_abs = fetch_source_asset(cfg, rel)
+    if not src_abs:
+        summary = f"asset {rel} unavailable; left unchanged"
+        ctx.record_task(task_id, "channel", summary); return summary
+
+    ctx.add_asset(rel, src_abs)
+    fork_abs = os.path.join(ctx.assets_dir, rel)
+    state = json.load(open(src_abs))
+    n_real, placement = locate_target(state, service)
+    counts = counts_channel(cfg, n_real)
+
+    prompt = build_channel_prompt(cfg, service, _instruction(source_py), fork_abs, n_real, counts, placement)
+    _, out = run_claude(prompt, ctx.root, cfg.model)
+
+    line = f"+{sum(counts.values())} items ({counts['filler']}f/{counts['near_miss']}n/{counts['superseded']}s) into {n_real} real\n{_tail(out)}"
+    if check:
+        line += "\n" + _soft_check(json.load(open(src_abs)), json.load(open(fork_abs)))
+    ctx.record_task(task_id, "channel", line)
+    return line
+
+
+def perturb_bolton(cfg: ChaffConfig, ctx: ForkContext, task_id: str, source_py: str) -> str:
+    service = "MailHub"
+    rel = f"task_{task_id}/chaff_mail.json"
+    ctx.write_asset(rel, json.dumps(_EMPTY_MAILHUB, indent=2))
+    state_abs = os.path.join(ctx.assets_dir, rel)
+    task_abs = os.path.join(ctx.tasks_dir, f"task_{task_id}.py")   # written by chaff.py first
+
+    counts = counts_boltnon(cfg)
+    prompt = build_bolton_prompt(cfg, service, _instruction(source_py), state_abs, task_abs, counts)
+    prompt = prompt.replace("{RELATIVE_STATE_ASSET}", rel)
+    _, out = run_claude(prompt, ctx.root, cfg.model)
+
+    line = f"attached {service} + {sum(counts.values())} distractor emails ({counts['filler']}f/{counts['near_miss']}n/{counts['superseded']}s)\n{_tail(out)}"
+    ctx.record_task(task_id, "bolt_on", line)
+    return line

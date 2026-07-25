@@ -1,16 +1,8 @@
-# OSChaff fork config — two dials + what to target.
-# Compile:  python -m oschaff.compile --config chaff.yaml
-
-model: claude-opus-4-8        # LLM the headless worker uses to author noise
-amount: 0.5                   # VOLUME: fraction of items that stay real (lower = more noise)
-relevance: 0.7                # CLOSENESS: 0=filler, 0.5=near-miss, 1=superseded-heavy
-services: [MailHub, TeamChat]
-bolt_on: true                 # provision a channel into tasks that lack one
-dynamic_delivery: true        # also inject mid-run messages (time_data) where supported
-seed: 20260724
-
+# OSChaff config (CLI flags override these).
+# Run:  python -m oschaff.chaff 035 --group harder-v1 --volume 6 --deceptiveness 8
+model: claude-opus-4-8
+volume: 5              # 0-10: how much distractor material
+deceptiveness: 7      # 0-10: filler -> near-miss -> disarmable traps
 source_tasks: cache/osworld_tasks
 source_assets: cache/osworld_assets
-output_root: forks
-max_parallel: 4
-max_retries: 1
+out_root: forks
