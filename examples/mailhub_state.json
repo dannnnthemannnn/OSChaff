@@ -1,0 +1,50 @@
+{
+  "metadata": {"service": "MailHub", "user_id": "user-4b386445"},
+  "emails": [
+    {
+      "id": "real_001",
+      "from": "alice@company.com",
+      "to": ["user-4b386445@example.com"],
+      "subject": "Q4 vendor approved: Northwind Supplies",
+      "body": "Finance approved Northwind Supplies as the vendor for the Q4 hardware order. Cap is $8,000. Please use them.",
+      "timestamp": "2026-05-01T06:24:05.632612+00:00",
+      "read": false,
+      "starred": true,
+      "important": true,
+      "labels": ["l1"],
+      "category": "primary",
+      "folder": "inbox",
+      "attachments": [{"id": "faea7e3c", "name": "approval.pdf", "size": "2.4 MB", "type": "pdf", "url": "https://drive.example.com/approval.pdf"}]
+    },
+    {
+      "id": "real_002",
+      "from": "bob@company.com",
+      "to": ["user-4b386445@example.com"],
+      "subject": "Purchase order details",
+      "body": "Order 12 monitors, model AX-27, deliver to the 4th floor by May 20.",
+      "timestamp": "2026-05-02T09:10:00.000000+00:00",
+      "read": false,
+      "starred": false,
+      "important": true,
+      "labels": [],
+      "category": "primary",
+      "folder": "inbox",
+      "attachments": []
+    },
+    {
+      "id": "real_003",
+      "from": "carol@company.com",
+      "to": ["user-4b386445@example.com"],
+      "subject": "Shipping address confirmation",
+      "body": "Confirmed: ship to 500 Market St, Suite 400.",
+      "timestamp": "2026-05-02T14:45:00.000000+00:00",
+      "read": true,
+      "starred": false,
+      "important": false,
+      "labels": ["l2"],
+      "category": "primary",
+      "folder": "inbox",
+      "attachments": []
+    }
+  ]
+}
