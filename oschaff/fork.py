@@ -53,7 +53,8 @@ class ForkContext:
 
 def new_fork(cfg: ChaffConfig) -> ForkContext:
     fork_uuid = str(uuid.uuid4())[:8]
-    root = os.path.join(cfg.output_root, f"OSWorld-Chaff-{fork_uuid}")
+    # absolute so the headless worker (run with cwd=root) resolves paths correctly
+    root = os.path.abspath(os.path.join(cfg.output_root, f"OSWorld-Chaff-{fork_uuid}"))
     tasks_dir = os.path.join(root, "tasks")
     assets_dir = os.path.join(root, "assets")
     os.makedirs(tasks_dir, exist_ok=True)
