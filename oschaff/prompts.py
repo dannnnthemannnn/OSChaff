@@ -59,9 +59,13 @@ def volume_floor(volume: int) -> int:
     return 0 if volume <= 0 else max(3, round(volume * 1.5))
 
 
+COUNT_CAP = 40  # most the worker can reliably author in one claude -p run
+
+
 def counts_channel(cfg: ChaffConfig, n_real: int) -> dict[str, int]:
-    # ratio to existing content, but never below the volume-scaled floor
+    # ratio to existing content, floored by volume, capped so it's achievable
     total = max(volume_floor(cfg.volume), round(n_real * cfg.volume / 2))
+    total = min(total, COUNT_CAP)
     return _split(total, nastiness_to_mix(cfg.deceptiveness / 10))
 
 
