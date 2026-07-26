@@ -60,12 +60,22 @@ dials); the model decides *what* to write and *where*.
 pip install huggingface_hub pyyaml          # the tool's only deps beyond the stdlib
 ```
 - **Claude Code CLI** installed and logged in — the worker shells out to `claude` (auth is ambient).
-- **OSWorld 2.0 gated access** (the task classes and assets are gated to prevent benchmark leakage):
-  request access to [`xlangai/osworld_v2_tasks`](https://huggingface.co/datasets/xlangai/osworld_v2_tasks)
-  and [`xlangai/osworld_v2_assets_gated`](https://huggingface.co/datasets/xlangai/osworld_v2_assets_gated),
-  then `hf auth login`.
-- Put the task classes under **`cache/osworld_tasks/`** (`task_001.py … task_108.py`). Assets are
-  fetched from HF on demand (or pre-download them under `cache/osworld_assets/`).
+- **OSWorld 2.0 gated access.** The task classes and assets are gated on HuggingFace (deliberately —
+  to keep task answers/graders off the public web). You need your own access:
+  1. Request access (auto-approves) on both datasets:
+     [`xlangai/osworld_v2_tasks`](https://huggingface.co/datasets/xlangai/osworld_v2_tasks) and
+     [`xlangai/osworld_v2_assets_gated`](https://huggingface.co/datasets/xlangai/osworld_v2_assets_gated).
+  2. Authenticate: `hf auth login` (paste a HF read token).
+  3. Download the task classes into `cache/osworld_tasks/`:
+     ```bash
+     hf download xlangai/osworld_v2_tasks --repo-type dataset \
+       --include "task_*.py" --local-dir cache/osworld_tasks
+     ```
+     Assets are fetched from HF on demand as tasks are perturbed. (To pre-download them, pull
+     `xlangai/osworld_v2_assets_gated` the same way into `cache/osworld_assets/`.)
+
+> These datasets are gated for anti-leakage reasons, so **there is no way to make forks without your
+> own HuggingFace access** — and correspondingly, don't publish forks you generate (see Limitations).
 
 ---
 
