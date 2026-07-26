@@ -13,15 +13,17 @@
 # live at web.hku.icu (the default).
 set -euo pipefail
 
-MODEL="claude-sonnet-4-6"; STEPS=150; NUM_ENVS=1
+MODEL="claude-sonnet-4-6"; STEPS=150; NUM_ENVS=1; PROVIDER="docker"; REGION="us-east-1"
 OSWORLD=""; FORK=""; TASKS=""; ORIG_ASSETS=""
 while [[ $# -gt 0 ]]; do case "$1" in
-  --osworld) OSWORLD="$2"; shift 2;;
-  --fork)    FORK="$2"; shift 2;;
-  --tasks)   TASKS="$2"; shift 2;;
-  --model)   MODEL="$2"; shift 2;;
-  --steps)   STEPS="$2"; shift 2;;
-  --assets)  ORIG_ASSETS="$2"; shift 2;;
+  --osworld)  OSWORLD="$2"; shift 2;;
+  --fork)     FORK="$2"; shift 2;;
+  --tasks)    TASKS="$2"; shift 2;;
+  --model)    MODEL="$2"; shift 2;;
+  --steps)    STEPS="$2"; shift 2;;
+  --assets)   ORIG_ASSETS="$2"; shift 2;;
+  --provider) PROVIDER="$2"; shift 2;;   # docker (one box) | aws | vmware ...
+  --region)   REGION="$2"; shift 2;;     # only used when --provider aws
   *) echo "unknown flag: $1"; exit 1;;
 esac; done
 
@@ -43,6 +45,7 @@ run_set () {  # $1=label  $2=asset_base  $3=result_dir
   ( cd "$OSWORLD" && OSWORLD_FILE_BASE_URL="$2" \
     uv run python scripts/python/run_multienv_claude.py \
       --headless --observation_type screenshot --action_space claude_computer_use \
+      --provider_name "$PROVIDER" --region "$REGION" \
       --model "$MODEL" --max_steps "$STEPS" --num_envs "$NUM_ENVS" \
       --test_all_meta_path "$META" --result_dir "$3" )
 }
