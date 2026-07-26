@@ -8,9 +8,24 @@ The pattern library below is what makes distractors potent-yet-fair.
 from __future__ import annotations
 
 from .config import ChaffConfig
-from .perturb import nastiness_to_mix
 
 _ITEM_WORD = {"MailHub": "email", "TeamChat": "message"}
+
+
+def nastiness_to_mix(deceptiveness: float) -> dict[str, float]:
+    """Map deceptiveness (0-1) to a filler/near_miss/superseded split.
+
+    0.0 -> all filler; 0.5 -> mostly near-miss; 1.0 -> superseded-heavy.
+    """
+    anchors = {
+        0.0: {"filler": 1.0, "near_miss": 0.0, "superseded": 0.0},
+        0.5: {"filler": 0.3, "near_miss": 0.7, "superseded": 0.0},
+        1.0: {"filler": 0.2, "near_miss": 0.3, "superseded": 0.5},
+    }
+    lo, hi = (0.0, 0.5) if deceptiveness <= 0.5 else (0.5, 1.0)
+    t = 0.0 if hi == lo else (deceptiveness - lo) / (hi - lo)
+    return {k: anchors[lo][k] + t * (anchors[hi][k] - anchors[lo][k])
+            for k in ("filler", "near_miss", "superseded")}
 
 # The gold-standard trap patterns: non-authoritative content that looks
 # decision-relevant but isn't, so a careless agent is tricked but a careful one

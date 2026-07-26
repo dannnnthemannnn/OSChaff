@@ -1,112 +1,177 @@
-# OSChaff
+# OSChaff — a difficulty dial for OSWorld 2.0
 
-A signal-to-noise **perturbation harness** for [OSWorld 2.0](https://osworld-v2.xlang.ai/).
-It takes an existing OSWorld 2.0 task and injects controlled distractor material
-into its initial web-service state **without altering ground truth**, producing a
-paired difficulty curve on tasks whose graders are already validated.
+**OSChaff turns up the difficulty of [OSWorld 2.0](https://osworld-v2.xlang.ai/) computer-use
+tasks by injecting realistic *information noise* — distractor emails and chat messages the agent
+must sift through — without changing what a task requires or its correct answer.** You point it at
+a task, pull two dials (how much noise, how deceptive), and it emits a *fork* you run with the
+stock OSWorld-V2 runner. Same graders, same tasks, more hay around the needle.
 
-We are not authoring tasks and not writing graders — those are the expensive,
-already-validated parts (36 authors, two annotators re-solving every task). We
-add one orthogonal difficulty **dial** to that work and report what happens.
+## Why
 
-## Why this is worth building
+OSWorld 2.0's own failure analysis found that frontier agents don't fail on GUI control or coding —
+they fail on **holding a task model together in a messy environment**: they miss information, can't
+tell stale facts from current ones, and act on the wrong source. Those are *information-discrimination*
+failures. OSChaff makes that axis a **knob**: keep the task and its validated grader exactly as they
+are, and flood the environment with plausible-but-wrong material. A benchmark with a difficulty
+parameter doesn't saturate — you turn the dial.
 
-OSWorld 2.0's own failure analysis says agents don't fail on GUI control or
-coding. They fail on **hidden-state phenomena**: they drop constraints, can't
-tell stale information from current, and spend <7% of their budget catching their
-own mistakes. The paper *defines* the phenomenon called **Conflict Disambiguation**
-(36% of tasks) as, verbatim, "resolving stale, noisy, contradictory, or
-distracting information by identifying which source is authoritative." That is a
-word-for-word description of what this harness injects. OSChaff doesn't invent a
-new difficulty axis — it turns a **dial** on a phenomenon the authors already
-measured agents failing at.
+**Core invariant: add material, never alter ground truth.** Real items stay byte-for-byte; graders
+are never touched. So every validated checkpoint still means what it meant.
 
-A benchmark with a difficulty parameter doesn't saturate. OSWorld 1.0 went 12% →
-83.5% in two years and had to be replaced. You turn the dial instead.
+---
 
-## Two dials, one invariant
+## How it works
 
-The whole config is two numbers plus what to fuzz (`oschaff.yaml`):
+### Two dials (0–10)
 
-| Dial | Field | What it does |
-|---|---|---|
-| **Volume** | `signal_fraction` (0,1] | fraction of items that are real. `1.0` = untouched, `0.5` = one distractor per real item, `0.25` = three per real. Lower = more to read (the horizon axis). |
-| **Closeness** | `nastiness` [0,1] | distractor *type* mix. `0.0` = harmless filler → `0.5` = near-miss (plausible but wrong) → `1.0` = superseded (stale, conflicting earlier versions). |
+| Dial | What it controls |
+|---|---|
+| **`--volume`** | how much distractor material (floods even a sparse inbox at high volume) |
+| **`--deceptiveness`** | how hard the distractors are to dismiss: `0` = obvious filler → `5` = plausible near-misses → `10` = the disarmable-trap patterns below |
 
-They're orthogonal on purpose: hold the distractor **count** fixed and move only
-`nastiness` to isolate *discrimination* difficulty from *horizon*. Everything
-that protects ground truth is **enforced in code, not config** — it's the
-integrity of the method, not a user preference.
+### Distractor types
 
-**The invariant:** *add material, never alter ground truth.* `verify.py` enforces
-it mechanically on every run:
-1. every real item is still present and byte-for-byte unchanged (only additions);
-2. no distractor matches a real item on all its load-bearing fields (no accidental scored-correct);
-3. every injected item is provenance-marked, so it can always be stripped back to baseline.
+Distractors are **non-authoritative content that looks decision-relevant but isn't** — a careless
+agent is tricked, but a careful one that trusts the real task still gets it right (that fairness
+property is deliberate: if following a distractor would be the *reasonable* choice, it's too strong):
 
-A violation raises — it's a bug, not a harder task.
+- **filler** — topically unrelated; cheap to ignore.
+- **near-miss** — shares an entity (sender/topic/date) with a real item but differs on the load-bearing detail (a *different* team, amount, vendor, date).
+- **future-dated** — a policy that "takes effect later." *"We now mirror exports L-R — effective in 2 weeks; keep the current process until then."*
+- **conditional / wrong-scope** — applies to a *different* team/context. *"For Marketing deliverables use 1024×768."* (task is an Eng deliverable)
+- **superseded** — an earlier value a later real item overrode (*"cap is $800"* before the real *"$1,000"*).
+- **rejected** — a proposal shot down in-thread. *"Drop the cap to $500?"* → *"No, keep $1,000."*
+- **merely-floated** — an idea raised but never confirmed. *"Maybe switch vendors?"* → *(no reply)*.
 
-## Three noise types
+### Two modes (auto-detected)
 
-- **`filler`** — topically unrelated. Cheap to filter. The floor condition.
-- **`near_miss`** — plausible but wrong: shares an entity with a real item but
-  differs on a load-bearing field. Forces real discrimination, not topic filtering.
-- **`superseded`** — an *earlier-timestamped* version of a real claim with a
-  different value; the newer real item stays authoritative. This is the
-  interesting one, and it's the **static** form of the Task 035 trap (a mid-run
-  TeamChat correction), so it needs zero understanding of the dynamic-update hook.
+- **Channel** — the task *already* uses MailHub (email) or TeamChat (Slack): OSChaff **floods the existing state** so distractors compete with the real load-bearing items. Strongest signal.
+- **Bolt-on** — the task has no such channel: OSChaff **attaches a MailHub inbox** (writes a new state, adds the launch/provision lines to the task's `setup()`, and appends a hint to the instruction — *"you may have relevant messages in MailHub"*), then floods that. Lets any task carry the noise axis.
 
-## Try it (no deployment, no API key)
+A headless **Claude Code** worker (`claude -p`) authors the actual content — it reads the task and
+writes distractors targeting its real decision points. The harness fixes the *counts* (from the
+dials); the model decides *what* to write and *where*.
+
+---
+
+## Install & prerequisites
 
 ```bash
-python examples/demo.py     # sweeps both dials over the sample MailHub inbox
-python -m pytest tests/     # the invariants are the product; they're tested hard
+pip install huggingface_hub pyyaml          # the tool's only deps beyond the stdlib
+```
+- **Claude Code CLI** installed and logged in — the worker shells out to `claude` (auth is ambient).
+- **OSWorld 2.0 gated access** (the task classes and assets are gated to prevent benchmark leakage):
+  request access to [`xlangai/osworld_v2_tasks`](https://huggingface.co/datasets/xlangai/osworld_v2_tasks)
+  and [`xlangai/osworld_v2_assets_gated`](https://huggingface.co/datasets/xlangai/osworld_v2_assets_gated),
+  then `hf auth login`.
+- Put the task classes under **`cache/osworld_tasks/`** (`task_001.py … task_108.py`). Assets are
+  fetched from HF on demand (or pre-download them under `cache/osworld_assets/`).
+
+---
+
+## Usage
+
+### Perturb one task
+
+```bash
+python -m oschaff.chaff 035 --group harder-v1 --volume 6 --deceptiveness 8
+```
+- `<task_id>` — e.g. `035` (or `35`).
+- `--group` — names the fork; output is routed to `forks/<group>/`. Reuse the same group to
+  **accumulate** tasks into one fork.
+- Mode is auto-detected; review the change with `git diff forks/harder-v1`.
+
+### Generate a full benchmark fork
+
+Loop the command over whatever subset (or all 108) you want, into one group:
+
+```bash
+for id in $(seq -w 1 108); do
+  python -m oschaff.chaff $id --group harder-v1 --volume 6 --deceptiveness 7
+done
+```
+Each run auto-picks channel vs. bolt-on. Some tasks **skip cleanly** (e.g. channel tasks that build
+their state dynamically); the report notes them.
+
+### What a fork contains
+
+```
+forks/harder-v1/
+  tasks/task_*.py     edited task classes (only channel/bolt-on tasks differ)
+  assets/             perturbed + injected state JSONs (same relative paths as upstream)
+  fork.json           config + fork id
+  MANIFEST.lock       sha256 of every file (integrity)
+  REPORT.md           human-readable audit: per task, the injected messages (eyeball this)
 ```
 
-The offline `templated` generator is deterministic and dependency-free. The
-`llm` generator (set `generator: llm`) writes natural distractors that understand
-the seed item — it needs the `anthropic` SDK + a key, and **falls back to
-templated** on any failure, so the library always runs.
+---
 
-## Status & what's real vs. gated
+## Running the fork (baseline vs. fork)
 
-This repo currently implements the **perturbation engine + invariant enforcement**,
-provable today against MailHub — the one state schema fully published in the paper
-(Figure 13). That's deliberate: it's the part that carries the scientific claim
-and needs no deployment.
+OSChaff only *produces* the fork; **the stock OSWorld-V2 runner executes it.** Two integration
+points, no changes to their code: drop the fork's `task_*.py` into `evaluation_examples/task_class/`,
+and set `OSWORLD_FILE_BASE_URL` to the fork's `assets/`.
 
-What "run a perturbed task end-to-end" additionally requires (and does **not** yet
-exist here):
+`scripts/run_chaff_eval.sh` does that for you and prints the per-task **baseline vs. fork** score delta:
 
-- **Gated access** to the tasks (`xlangai/osworld_v2_tasks`, Python task classes)
-  and assets (`xlangai/osworld_v2_assets_gated`). Request on Hugging Face.
-- **The self-hosted website stack** (`basesite`) — *not* in the public OSWorld-V2
-  repo; hosted separately. This is where `/api/state` and `/state-manage` live.
-- A desktop-VM provider + model spend (~$72/task at 500 steps).
+```bash
+export ANTHROPIC_API_KEY=sk-...
+scripts/run_chaff_eval.sh \
+  --osworld /path/to/OSWorld-V2 \
+  --fork    /path/to/OSChaff/forks/harder-v1 \
+  --tasks   "007 016 002" \
+  --steps   150            # defaults: --model claude-sonnet-4-6
+```
+```
+task     baseline   fork     delta
+007      0.90       0.40     -0.50    ← chaff made it harder
+```
 
-First thing to confirm once gated access lands: whether each service's initial
-state arrives as a JSON asset file, a `/api/state` push at setup, or inline in the
-task class. All three are perturbable; we just need to see which.
+**Environment setup (their side):** an [OSWorld-V2](https://github.com/xlang-ai/OSWorld-V2) checkout
+with a VM provider. Simplest is the **Docker provider on one x86 Linux EC2 box** (ssh in, `pip install -e .`,
+download tasks/assets). The mock web services are live at the default `WEBSITE_HOST_SUFFIX=web.hku.icu`,
+so there's **no web infra to stand up**. The runner defaults to `claude-sonnet-4-6`. See their
+`docs/PROVIDER_SETUP.md`.
 
-## Roadmap
+---
 
-- [x] Perturbation engine, two dials, mechanical invariants, MailHub schema, tests
-- [ ] Capture remaining schemas (TeamChat, VaultBank, CloudCRM) from `/state-manage`
-- [ ] Wire into the OSWorld-V2 runner as a state-setup shim (perturb, then hand off)
-- [ ] `phenomenon_score`: tag which checkpoints require resolving the conflict,
-      and report it alongside binary/partial (it's the metric designed to separate)
-- [ ] Paired noise curve on ~10 short, conflict-tagged tasks; report steps
-      alongside score so degradation can be separated from horizon
-- [ ] Correction-budget telemetry: does self-repair spending rise under noise?
+## OSChaff vs. OSWorld-V2
+
+| | Source | Role |
+|---|---|---|
+| `oschaff/`, `scripts/run_chaff_eval.sh` | **this repo** | *compiler* — produces a harder fork + glue to run it |
+| `desktop_env/`, `mm_agents/`, `run_multienv_claude.py`, tasks, assets, graders | **OSWorld-V2 + gated HF** | *runtime* — spins the VM, runs the agent, scores |
+
+OSChaff is a **compiler** that emits a harder benchmark; OSWorld-V2 is the **runtime** that executes it.
+
+---
+
+## Limitations (read these)
+
+- **Perceptual tasks are hard to bite.** For tasks whose difficulty is drawing/video/CAD editing,
+  distractor emails mostly just waste steps — unless a *disarmable-trap directive* targets a real
+  parameter (an orientation, dimension, format), which can flip the deliverable. The tool never
+  *skips* them (it'll bolt-on to anything); whether it bit is decided by the score delta, not by us.
+- **Some channel tasks skip.** A few build their MailHub/TeamChat state in Python rather than a JSON
+  asset; those are reported as skipped.
+- **Fairness isn't machine-checked.** The "must be disarmable" rule is enforced by the worker prompt
+  and by *you* eyeballing `REPORT.md` — that's what the report is for.
+- **Don't publicly redistribute forks.** A fork embeds the tasks' graders/answers. Publishing it
+  leaks the benchmark (and re-hosting the gated assets is a licensing gray area). Share the *tool +
+  config*; let others reproduce forks against their own gated access.
+
+---
 
 ## Layout
 
 ```
 oschaff/
-  schemas.py   per-service state schemas (MailHub known; rest from /state-manage)
-  generate.py  distractor generators: templated (offline) + llm (pluggable)
-  perturb.py   the two dials + config
-  verify.py    mechanical invariant enforcement
-examples/      sample MailHub state + a runnable dial-sweep demo
-tests/         invariant tests
+  chaff.py      CLI entrypoint (single task -> fork)
+  config.py     ChaffConfig (the 0-10 dials)
+  prompts.py    worker prompts + distractor pattern library
+  worker.py     the headless `claude -p` channel/bolt-on workers
+  fork.py       the group-keyed, accumulating fork directory
+  checks.py     optional additive-only sanity check (`--check`)
+scripts/run_chaff_eval.sh   baseline-vs-fork eval wrapper
+chaff.yaml                  example config
 ```

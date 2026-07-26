@@ -21,7 +21,9 @@ from __future__ import annotations
 import ast
 import json
 
-from .verify import InvariantError
+
+class InvariantError(AssertionError):
+    """Raised when a perturbation would compromise ground truth."""
 
 
 # --------------------------------------------------------------------------- #

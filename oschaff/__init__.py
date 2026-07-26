@@ -1,41 +1,13 @@
-"""OSChaff: a signal-to-noise perturbation harness for OSWorld 2.0.
+"""OSChaff — a difficulty dial for OSWorld 2.0.
 
-Add controlled distractor material to an OSWorld 2.0 task's initial web-service
-state, without altering ground truth, producing a paired difficulty curve on
-tasks whose graders are already validated.
+Inject controlled information-noise (distractor emails / chat messages) into an
+OSWorld 2.0 task without altering ground truth, producing a harder fork you can
+run with the stock OSWorld-V2 runner.
 
-Two dials:
-    signal_fraction  volume (how much distractor material)
-    nastiness        closeness (filler -> near_miss -> superseded)
-
-Quickstart:
-    from oschaff import PerturbConfig, perturb
-    cfg = PerturbConfig(targets=["MailHub.emails"], signal_fraction=0.4, nastiness=0.8)
-    perturbed_states, reports = perturb({"MailHub.emails": mailhub_state}, cfg)
+CLI:  python -m oschaff.chaff <task_id> --group <id> --volume 0-10 --deceptiveness 0-10
 """
 
-from .perturb import (
-    PerturbConfig,
-    PerturbationReport,
-    nastiness_to_mix,
-    perturb,
-    perturb_collection,
-)
-from .schemas import REGISTRY, Schema, get_schema
-from .verify import InvariantError, check_invariants, strip_perturbations
+from .config import ChaffConfig
 
-__all__ = [
-    "PerturbConfig",
-    "PerturbationReport",
-    "perturb",
-    "perturb_collection",
-    "nastiness_to_mix",
-    "Schema",
-    "get_schema",
-    "REGISTRY",
-    "check_invariants",
-    "InvariantError",
-    "strip_perturbations",
-]
-
-__version__ = "0.1.0"
+__all__ = ["ChaffConfig"]
+__version__ = "0.2.0"
