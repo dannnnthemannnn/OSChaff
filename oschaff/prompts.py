@@ -38,13 +38,20 @@ def _split(total: int, mix: dict[str, float]) -> dict[str, int]:
     return out
 
 
+def volume_floor(volume: int) -> int:
+    """Minimum distractors, scaled by the dial (so high volume floods even a
+    sparse inbox). 0 at volume 0, else at least 3."""
+    return 0 if volume <= 0 else max(3, round(volume * 1.5))
+
+
 def counts_channel(cfg: ChaffConfig, n_real: int) -> dict[str, int]:
-    total = round(n_real * cfg.volume / 2)
+    # ratio to existing content, but never below the volume-scaled floor
+    total = max(volume_floor(cfg.volume), round(n_real * cfg.volume / 2))
     return _split(total, nastiness_to_mix(cfg.deceptiveness / 10))
 
 
 def counts_boltnon(cfg: ChaffConfig) -> dict[str, int]:
-    total = max(3, round(cfg.volume * 1.2))     # no real items to scale off; use the dial
+    total = volume_floor(cfg.volume)            # no real items to scale off; use the dial
     return _split(total, nastiness_to_mix(cfg.deceptiveness / 10))
 
 
