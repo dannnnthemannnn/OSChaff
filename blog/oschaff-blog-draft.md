@@ -1,6 +1,6 @@
 # OSChaff — Making OSWorld 2.0 Progressively Harder
 
-Claude Opus 5 is already scoring around 70% on OSWorld 2.0 — a benchmark that is barely a year old — and people are already asking where the harder benchmark is going to come from. That's a rough deal for the folks who built it: OSWorld 2.0 represents an enormous amount of human effort — 108 long-horizon tasks, each hand-built and hand-validated (the authors checked every grader against real runs), plus an entire fleet of purpose-built web apps for the tasks to live in. You don't just crank out another one of those every time the models level up.
+Claude Opus 5 is already scoring around 70% on OSWorld 2.0, a benchmark that is barely a month old. People are already asking where the harder benchmark is going to come from. That's a rough deal for the folks who built it: OSWorld 2.0 represents an enormous amount of human effort — 108 long-horizon tasks, each hand-built and hand-validated (the authors checked every grader against real runs), plus an entire fleet of purpose-built web apps for the tasks to live in. You don't just crank out another one of those every time the models level up.
 
 And even if you did — build OSWorld 3, spend another year on it — the models improve again, and you're right back where you started. Benchmark treadmills are expensive.
 
@@ -59,21 +59,19 @@ Two modes, auto-detected:
 
 ## The experiment: task 016
 
-Task 016 is the recruiting workflow from the bullet list above, and it's a beast even before I touched it: identify the award-winning papers, find each first and last author's email on the open web, send personalized emails (intern pitch to first authors, senior-scientist pitch to last authors), and check each author's location on CareerLink — San Jose locals get an "onsite" pitch plus a coffee-chat invite, everyone else gets "remote." The grader checks recipients, subject lines, and body content, with partial credit.
+Task 016 is the recruiting workflow from the bullet list above, and it's a beast even before I touched it: identify the award-winning papers, find each first and last author's email, send personalized emails (intern pitch to first authors, senior-scientist pitch to last authors), and check each author's location on CareerLink — San Jose locals get an "onsite" pitch plus a coffee-chat invite, everyone else gets "remote." The grader checks recipients, subject lines, and body content, with partial credit.
+
+Worth being clear about where everything lives, because it's a genuinely multi-source task. The papers and author emails come from the **real web** — the VM has live internet access, so the agent browses arXiv and authors' homepages (these are real papers and real people). The email body template is a document on the desktop. The MailHub **Sent folder** holds an example email showing the expected format. And MailHub is the outbox: every graded email gets composed and sent there. Notice what's *not* on that list — the inbox. At baseline, the inbox contains nothing the task needs.
 
 I ran it three ways with **Claude Opus 5** as the agent, 300 steps max, same grader every time:
 
-| Condition | What's in the inbox | Score |
-|---|---|---|
-| **Baseline** | The stock task, untouched | **0.90** |
-| **Level 5** | +22 injected emails (volume 5, deceptiveness 5) | **0.64** |
-| **Level 10** | +45 injected emails (volume 10, deceptiveness 10) | **0.11** |
+![Results: baseline 0.90, level 5 0.64, level 10 0.11](images/016_results_table.png)
 
-Here's the baseline inbox the agent sees — two whole emails, one of which is about lunch:
+Here's the baseline inbox the agent sees — two whole emails, neither of which has anything to do with the job (one is about lunch):
 
 ![Baseline: the stock task_016 inbox](images/016_inbox_baseline.png)
 
-And here's level 10:
+And here's level 10 — the same dead inbox, now dressed up as a wall of campaign guidance from fake coworkers:
 
 ![Level 10: same task, same grader, 45 injected distractors](images/016_inbox_level10.png)
 
